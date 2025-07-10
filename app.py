@@ -186,11 +186,13 @@ Make it more conversational and add some personality. Keep the tone friendly and
                 "original_title": submission.title
             }
             
-            # Generate AI title
+                # Generate AI title
             try:
                 prompt = personality.prompt_template.replace("{original_title}", submission.title)
                 
-                response = openai.ChatCompletion.create(
+                # Updated OpenAI API call for new client
+                client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                response = client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[
                         {"role": "system", "content": "You are a creative title rewriter. Keep titles concise and engaging."},
