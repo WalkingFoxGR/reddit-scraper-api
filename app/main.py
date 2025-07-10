@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 
-from .routers import scraper
+from .routers import scraper_simple
 
 app = FastAPI(
     title="Reddit Scraper API",
@@ -20,7 +20,7 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(scraper.router)
+app.include_router(scraper_simple.router)
 
 @app.get("/")
 async def root():
