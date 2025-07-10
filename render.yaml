@@ -3,8 +3,9 @@ services:
     name: reddit-scraper-api
     runtime: python
     plan: free
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    buildCommand: pip install --only-binary :all: -r requirements.txt
     startCommand: gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
+    pythonVersion: "3.11"
     envVars:
       - key: REDDIT_CLIENT_ID
         sync: false
