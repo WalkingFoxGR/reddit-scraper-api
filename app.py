@@ -18,7 +18,10 @@ app = Flask(__name__)
 
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+if not DATABASE_URL:
+    print("WARNING: DATABASE_URL not found. Using SQLite for development.")
+    DATABASE_URL = "sqlite:///reddit_scraper.db"
+elif DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 engine = create_engine(DATABASE_URL)
