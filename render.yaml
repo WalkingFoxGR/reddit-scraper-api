@@ -4,7 +4,8 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    startCommand: gunicorn app:app -c gunicorn.conf.py
+    pythonVersion: "3.11"
     envVars:
       - key: REDDIT_CLIENT_ID
         sync: false
