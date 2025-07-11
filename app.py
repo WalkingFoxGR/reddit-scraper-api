@@ -100,16 +100,17 @@ def health():
 @app.route('/api/scrape', methods=['POST'])
 @require_api_key
 def scrape_reddit():
-    """Scrape Reddit and generate AI titles"""
+    
     data = request.get_json()
     
     # Extract parameters
     subreddit = data.get('subreddit', 'python')
-    limit = min(data.get('limit', 10), 50)  # Max 50
+    limit = min(data.get('limit', 10), 50)
     sort = data.get('sort', 'hot')
     time_filter = data.get('time_filter', 'week')
-    telegram_id = data.get('telegram_id', 0)
-    personality_name = data.get('personality_name', 'default')
+    use_ai = data.get('use_ai', False)
+    personality_id = data.get('personality_id', 'default')
+    assistant_id = data.get('assistant_id', '')
     
     task_id = str(uuid.uuid4())
     
@@ -186,7 +187,9 @@ Make it more conversational and add some personality. Keep the tone friendly and
                 "created_utc": submission.created_utc,
                 "author": str(submission.author) if submission.author else "[deleted]",
                 "subreddit": subreddit,
-                "original_title": submission.title
+                "original_title": submission.title,
+                "ai_title": None,
+                "needs_ai": use_ai
             }
             
                 # Generate AI title
