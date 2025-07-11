@@ -191,22 +191,22 @@ Make it more conversational and add some personality. Keep the tone friendly and
             
                 # Generate AI title
             try:
-                prompt = personality.prompt_template.replace("{original_title}", submission.title)
+                #prompt = personality.prompt_template.replace("{original_title}", submission.title)
                 
                 # Updated OpenAI API call for new client
-                client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are a creative title rewriter. Keep titles concise and engaging."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=personality.temperature,
-                    max_tokens=personality.max_tokens
-                )
+                #client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                #response = client.chat.completions.create(
+                 #   model="gpt-3.5-turbo",
+                   # messages=[
+                    #    {"role": "system", "content": "You are a creative title rewriter. Keep titles concise and engaging."},
+                     #   {"role": "user", "content": prompt}
+                    #],
+                    #temperature=personality.temperature,
+                    #max_tokens=personality.max_tokens
+                #)
                 
-                ai_title = response.choices[0].message.content.strip().strip('"').strip("'")
-                post_data["ai_title"] = ai_title
+                #ai_title = response.choices[0].message.content.strip().strip('"').strip("'")
+                #post_data["ai_title"] = ai_title
             except Exception as e:
                 post_data["ai_title"] = f"[AI Error] {submission.title}"
                 
