@@ -207,6 +207,7 @@ Make it more conversational and add some personality. Keep the tone friendly and
                 
                 #ai_title = response.choices[0].message.content.strip().strip('"').strip("'")
                 #post_data["ai_title"] = ai_title
+                post_data["ai_title"] = None  # No AI processing in API
             except Exception as e:
                 post_data["ai_title"] = f"[AI Error] {submission.title}"
                 
