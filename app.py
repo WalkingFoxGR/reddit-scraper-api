@@ -100,7 +100,7 @@ def health():
 @app.route('/api/scrape', methods=['POST'])
 @require_api_key
 def scrape_reddit():
-    
+    """Scrape Reddit without AI processing"""
     data = request.get_json()
     
     # Extract parameters
@@ -108,9 +108,6 @@ def scrape_reddit():
     limit = min(data.get('limit', 10), 50)
     sort = data.get('sort', 'hot')
     time_filter = data.get('time_filter', 'week')
-    use_ai = data.get('use_ai', False)
-    personality_id = data.get('personality_id', 'default')
-    assistant_id = data.get('assistant_id', '')
     
     task_id = str(uuid.uuid4())
     
@@ -191,6 +188,38 @@ Make it more conversational and add some personality. Keep the tone friendly and
                 "ai_title": None,
                 "needs_ai": use_ai
             }
+
+                        # Process posts WITHOUT AI
+        results = []
+        for submission in submissions:
+            post_data = {
+                "id": submission.id,
+                "title": submission.title,
+                "score": submission.score,
+                "url": submission.url,
+                "permalink": f"https://reddit.com{submission.permalink}",
+                "created_utc": submission.created_utc,
+                "author": str(submission.author) if submission.author else "[deleted]",
+                "subreddit": subreddit,
+                "num_comments": submission.num_comments,
+                "upvote_ratio": submission.upvote_ratio
+            }
+            results.append(post_data)
+        
+        return jsonify({
+            "task_id": task_id,
+            "status": "completed",
+            "message": f"Successfully scraped {len(results)} posts from r/{subreddit}",
+            "results": results
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "task_id": task_id,
+            "status": "failed",
+            "message": str(e),
+            "results": None
+        }), 500
             
                 # Generate AI title
             try:
