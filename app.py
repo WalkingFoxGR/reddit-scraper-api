@@ -47,11 +47,6 @@ def scrape_reddit():
     time_filter = data.get('time_filter', 'week')
     telegram_id = data.get('telegram_id')
     
-    # Check for use_ai header (from n8n)
-    use_ai = request.headers.get('use_ai', 'false').lower() == 'true'
-    personality_id = request.headers.get('personality_id', '')
-    assistant_id = request.headers.get('assistant_id', '')
-    
     task_id = str(uuid.uuid4())
     
     try:
@@ -94,8 +89,7 @@ def scrape_reddit():
             "status": "completed",
             "message": f"Successfully scraped {len(results)} posts from r/{subreddit}",
             "results": results,
-            "subreddit": subreddit,
-            "personality_used": personality_id if use_ai else "none"
+            "subreddit": subreddit
         })
         
     except Exception as e:
