@@ -7,10 +7,8 @@ import uuid
 
 load_dotenv()
 
-# Flask app
 app = Flask(__name__)
 
-# Initialize Reddit
 reddit = praw.Reddit(
     client_id=os.getenv("REDDIT_CLIENT_ID"),
     client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
@@ -40,9 +38,8 @@ def scrape_reddit():
     """Scrape Reddit posts - AI processing handled by n8n"""
     data = request.get_json()
     
-    # Extract parameters
     subreddit = data.get('subreddit', 'python')
-    limit = min(data.get('limit', 10), 50)
+    limit = min(data.get('limit', 10), 100)
     sort = data.get('sort', 'hot')
     time_filter = data.get('time_filter', 'week')
     telegram_id = data.get('telegram_id')
@@ -50,7 +47,6 @@ def scrape_reddit():
     task_id = str(uuid.uuid4())
     
     try:
-        # Scrape Reddit
         subreddit_obj = reddit.subreddit(subreddit)
         
         if sort == "hot":
@@ -64,7 +60,6 @@ def scrape_reddit():
         else:
             submissions = list(subreddit_obj.hot(limit=limit))
         
-        # Process posts without AI (AI will be handled in n8n)
         results = []
         for submission in submissions:
             post_data = {
@@ -95,10 +90,11 @@ def scrape_reddit():
     except Exception as e:
         return jsonify({
             "task_id": task_id,
-            "status": "failed",
+            "status": "failed", 
             "message": str(e),
             "results": None
         }), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 8000))
+    app.run(host='0.0.0.0', port=port, debug=False)
