@@ -1,259 +1,384 @@
-from flask import Flask, request, jsonify
 import os
-import praw
-from dotenv import load_dotenv
-from datetime import datetime
-import uuid
+import asyncio
 import logging
-import random
-
-load_dotenv()
-
-app = Flask(__name__)
+from datetime import datetime, timedelta
+import json
+import aiohttp
+from telegram import Update, Bot
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import praw
+from typing import Dict, List, Optional
+import redis
+from dataclasses import dataclass, asdict
+import time
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# Initialize Reddit client
-reddit = praw.Reddit(
-    client_id=os.getenv("REDDIT_CLIENT_ID"),
-    client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
-    user_agent=os.getenv("REDDIT_USER_AGENT", "RedditScraper/1.0")
-)
+# Configuration from environment variables
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+REDDIT_CLIENT_ID = os.getenv('REDDIT_CLIENT_ID')
+REDDIT_CLIENT_SECRET = os.getenv('REDDIT_CLIENT_SECRET')
+REDDIT_USER_AGENT = os.getenv('REDDIT_USER_AGENT', 'RedditScraperBot/1.0')
+N8N_WEBHOOK_URL = os.getenv('N8N_WEBHOOK_URL')
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
+ALLOWED_USERS = os.getenv('ALLOWED_USERS', '').split(',')  # Comma-separated telegram user IDs
 
-@app.route('/')
-def home():
-    return jsonify({
-        "message": "Reddit Scraper API",
-        "endpoints": {
-            "health": "/api/health",
-            "scrape-simple": "/api/scrape-simple",
-            "enhance-titles": "/api/enhance-titles"
-        }
-    })
+# Initialize Redis for rate limiting
+try:
+    redis_client = redis.from_url(REDIS_URL)
+except Exception as e:
+    logger.warning(f"Redis connection failed: {e}. Rate limiting disabled.")
+    redis_client = None
 
-@app.route('/api/health')
-def health():
-    return jsonify({
-        "status": "healthy",
-        "service": "reddit-scraper-api",
-        "version": "1.0.0"
-    })
+@dataclass
+class RedditPost:
+    """Reddit post data structure"""
+    title: str
+    score: int
+    url: str
+    author: str
+    created_utc: float
+    num_comments: int
+    subreddit: str
+    permalink: str
 
-@app.route('/api/scrape-simple', methods=['POST'])
-def scrape_simple():
-    """Simple scrape that returns just titles and upvotes - matches local implementation"""
-    data = request.get_json()
-    
-    # Log received data for debugging
-    logger.info(f"=== NEW SCRAPE REQUEST ===")
-    logger.info(f"Received data: {data}")
-    
-    subreddit_name = data.get('subreddit', 'python').lower().strip()
-    limit = min(int(data.get('limit', 10)), 50)
-    sort = data.get('sort', 'hot').lower().strip()
-    time_filter = data.get('time_filter', 'week').lower().strip()
-    telegram_id = data.get('telegram_id')
-    
-    # Additional logging
-    logger.info(f"Processing: r/{subreddit_name}, limit={limit}, sort={sort}, time={time_filter}")
-    
-    task_id = str(uuid.uuid4())
-    
-    try:
-        # Create fresh subreddit object (no caching)
-        subreddit_obj = reddit.subreddit(subreddit_name)
+class RateLimiter:
+    """Rate limiter for Reddit API calls"""
+    def __init__(self, redis_client: Optional[redis.Redis]):
+        self.redis = redis_client
+        self.reddit_limit = 100  # Reddit: 100 requests per minute
+        self.telegram_limit = 30  # Telegram: 30 messages per second
         
-        # Verify subreddit exists
+    async def check_reddit_limit(self, user_id: str) -> bool:
+        """Check if we can make a Reddit API call"""
+        if not self.redis:
+            return True
+            
+        key = f"reddit_limit:{user_id}"
+        current = self.redis.incr(key)
+        if current == 1:
+            self.redis.expire(key, 60)
+        return current <= self.reddit_limit
+    
+    async def check_telegram_limit(self) -> bool:
+        """Check if we can send a Telegram message"""
+        if not self.redis:
+            return True
+            
+        key = "telegram_limit"
+        current = self.redis.incr(key)
+        if current == 1:
+            self.redis.expire(key, 1)
+        return current <= self.telegram_limit
+
+rate_limiter = RateLimiter(redis_client)
+
+class RedditScraper:
+    """Reddit API wrapper using PRAW"""
+    def __init__(self):
+        self.reddit = praw.Reddit(
+            client_id=REDDIT_CLIENT_ID,
+            client_secret=REDDIT_CLIENT_SECRET,
+            user_agent=REDDIT_USER_AGENT
+        )
+        
+    async def scrape_subreddit(
+        self, 
+        subreddit_name: str, 
+        limit: int = 10, 
+        sort_type: str = 'hot',
+        time_filter: str = 'week'
+    ) -> List[RedditPost]:
+        """Scrape posts from a subreddit"""
         try:
-            subreddit_display_name = subreddit_obj.display_name
-            logger.info(f"Subreddit verified: r/{subreddit_display_name}")
-        except Exception as e:
-            logger.error(f"Invalid subreddit: r/{subreddit_name}")
-            return jsonify({
-                "task_id": task_id,
-                "status": "failed",
-                "message": f"Subreddit r/{subreddit_name} not found or private",
-                "results": []
-            }), 404
-        
-        # Get submissions based on sort type (exactly like local app)
-        submissions = []
-        if sort == "hot":
-            submissions = list(subreddit_obj.hot(limit=limit))
-        elif sort == "new":
-            submissions = list(subreddit_obj.new(limit=limit))
-        elif sort == "top":
-            submissions = list(subreddit_obj.top(time_filter=time_filter, limit=limit))
-        elif sort == "rising":
-            submissions = list(subreddit_obj.rising(limit=limit))
-        else:
-            submissions = list(subreddit_obj.hot(limit=limit))
-        
-        logger.info(f"Retrieved {len(submissions)} submissions from Reddit")
-        
-        # Process submissions (exactly like local app)
-        results = []
-        for i, submission in enumerate(submissions, 1):
-            post_data = {
-                "index": i,
-                "id": submission.id,
-                "title": submission.title,
-                "score": submission.score,  # This is upvotes
-                "upvotes": submission.score,  # Add explicit upvotes field
-                "url": submission.url,
-                "permalink": f"https://reddit.com{submission.permalink}",
-                "author": str(submission.author) if submission.author else "[deleted]",
-                "subreddit": subreddit_name,  # Use requested subreddit name
-                "num_comments": submission.num_comments
-            }
-            results.append(post_data)
-        
-        logger.info(f"Successfully processed {len(results)} posts from r/{subreddit_name}")
-        
-        return jsonify({
-            "task_id": task_id,
-            "status": "completed",
-            "message": f"Successfully scraped {len(results)} posts from r/{subreddit_name}",
-            "results": results,
-            "subreddit": subreddit_name,
-            "sort": sort,
-            "time_filter": time_filter,
-            "telegram_id": telegram_id,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        logger.error(f"Error scraping r/{subreddit_name}: {str(e)}")
-        return jsonify({
-            "task_id": task_id,
-            "status": "failed", 
-            "message": f"Error scraping r/{subreddit_name}: {str(e)}",
-            "results": []
-        }), 500
-
-@app.route('/api/enhance-titles', methods=['POST'])
-def enhance_titles():
-    """Enhance titles with AI based on user prompt - matches local implementation"""
-    
-    # Check OpenAI availability
-    try:
-        import openai
-        openai.api_key = os.getenv("OPENAI_API_KEY")
-        
-        if not openai.api_key:
-            return jsonify({
-                "status": "failed",
-                "message": "OpenAI API key not configured"
-            }), 500
+            subreddit = self.reddit.subreddit(subreddit_name)
             
-    except ImportError:
-        return jsonify({
-            "status": "failed",
-            "message": "OpenAI library not available"
-        }), 500
-    
-    data = request.get_json()
-    titles = data.get('titles', [])
-    user_prompt = data.get('prompt', 'Make these titles more engaging and clickable')
-    telegram_id = data.get('telegram_id')
-    
-    logger.info(f"AI Enhancement request: {len(titles)} titles, prompt: '{user_prompt}'")
-    
-    if not titles:
-        return jsonify({
-            "status": "failed",
-            "message": "No titles provided"
-        }), 400
-    
-    try:
-        enhanced_titles = []
-        
-        for item in titles:
-            original_title = item.get('title', '')
-            score = item.get('score', 0)
+            # Get posts based on sort type
+            if sort_type == 'top':
+                posts = subreddit.top(time_filter=time_filter, limit=limit)
+            elif sort_type == 'new':
+                posts = subreddit.new(limit=limit)
+            elif sort_type == 'hot':
+                posts = subreddit.hot(limit=limit)
+            elif sort_type == 'rising':
+                posts = subreddit.rising(limit=limit)
+            else:
+                posts = subreddit.hot(limit=limit)
             
-            # Create AI prompt (matches local app logic)
-            ai_prompt = f"""Please rewrite the following Reddit post title to make it more engaging:
-
-Original title: "{original_title}"
-Upvotes: {score}
-
-User instruction: {user_prompt}
-
-Rules:
-- Keep it under 100 characters
-- Make it engaging and clickable
-- Maintain the original meaning
-- Don't use excessive clickbait
-
-Enhanced title:"""
-            
-            try:
-                # Use OpenAI API (same as local app)
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are a creative title rewriter."},
-                        {"role": "user", "content": ai_prompt}
-                    ],
-                    max_tokens=100,
-                    temperature=0.7
+            # Extract post data
+            scraped_posts = []
+            for post in posts:
+                reddit_post = RedditPost(
+                    title=post.title,
+                    score=post.score,
+                    url=post.url,
+                    author=str(post.author) if post.author else '[deleted]',
+                    created_utc=post.created_utc,
+                    num_comments=post.num_comments,
+                    subreddit=post.subreddit.display_name,
+                    permalink=f"https://reddit.com{post.permalink}"
                 )
+                scraped_posts.append(reddit_post)
                 
-                enhanced_title = response.choices[0].message.content.strip()
-                
-                enhanced_titles.append({
-                    "index": item.get('index', len(enhanced_titles) + 1),
-                    "original_title": original_title,
-                    "ai_title": enhanced_title,  # Match local app naming
-                    "enhanced_title": enhanced_title,  # Also provide this for compatibility
-                    "score": score,
-                    "upvotes": score,  # Add explicit upvotes
-                    "url": item.get('url', ''),
-                    "permalink": item.get('permalink', ''),
-                    "author": item.get('author', '[deleted]')
-                })
-                
-            except Exception as ai_error:
-                logger.error(f"AI enhancement error for title '{original_title}': {str(ai_error)}")
-                enhanced_titles.append({
-                    "index": item.get('index', len(enhanced_titles) + 1),
-                    "original_title": original_title,
-                    "ai_title": original_title + " ✨",
-                    "enhanced_title": original_title + " ✨",
-                    "score": score,
-                    "upvotes": score,
-                    "url": item.get('url', ''),
-                    "permalink": item.get('permalink', ''),
-                    "author": item.get('author', '[deleted]'),
-                    "error": "AI enhancement failed"
-                })
+            return scraped_posts
+            
+        except Exception as e:
+            logger.error(f"Error scraping r/{subreddit_name}: {e}")
+            raise
+
+class N8NConnector:
+    """Handle communication with n8n workflow"""
+    def __init__(self, webhook_url: str):
+        self.webhook_url = webhook_url
         
-        logger.info(f"Successfully enhanced {len(enhanced_titles)} titles")
+    async def send_to_n8n(self, data: Dict) -> Dict:
+        """Send data to n8n webhook and get response"""
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                    self.webhook_url,
+                    json=data,
+                    timeout=aiohttp.ClientTimeout(total=180)
+                ) as response:
+                    return await response.json()
+            except Exception as e:
+                logger.error(f"Error sending to n8n: {e}")
+                raise
+
+# Initialize components
+reddit_scraper = RedditScraper()
+n8n_connector = N8NConnector(N8N_WEBHOOK_URL) if N8N_WEBHOOK_URL else None
+
+async def check_user_access(user_id: int) -> bool:
+    """Check if user has access to the bot"""
+    if not ALLOWED_USERS or ALLOWED_USERS == ['']:
+        return True  # No restrictions if ALLOWED_USERS not set
+    return str(user_id) in ALLOWED_USERS
+
+async def scrape_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /scrape command"""
+    user_id = update.effective_user.id
+    
+    # Check user access
+    if not await check_user_access(user_id):
+        await update.message.reply_text(
+            "❌ Access denied. Please contact the administrator to request access."
+        )
+        return
+    
+    # Parse command arguments
+    args = context.args
+    if len(args) < 4:
+        await update.message.reply_text(
+            "🤔 I need more info to scrape Reddit!\n\n"
+            "💡 Usage: `/scrape [subreddit] [limit] [sort] [time_filter]`\n"
+            "Example: `/scrape python 10 top week`\n\n"
+            "Sort options: hot, new, top, rising\n"
+            "Time filters (for top): hour, day, week, month, year, all"
+        )
+        return
+    
+    subreddit = args[0]
+    try:
+        limit = min(int(args[1]), 50)  # Max 50 posts
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number of posts. Please use a number between 1-50.")
+        return
         
-        return jsonify({
-            "status": "completed",
-            "message": f"Enhanced {len(enhanced_titles)} titles",
-            "results": enhanced_titles,
-            "user_prompt": user_prompt,
-            "telegram_id": telegram_id
-        })
+    sort_type = args[2].lower() if args[2].lower() in ['hot', 'new', 'top', 'rising'] else 'hot'
+    time_filter = args[3].lower() if args[3].lower() in ['hour', 'day', 'week', 'month', 'year', 'all'] else 'week'
+    
+    # Check rate limits
+    if not await rate_limiter.check_reddit_limit(str(user_id)):
+        await update.message.reply_text(
+            "⏳ Rate limit reached. Please wait a minute before trying again."
+        )
+        return
+    
+    # Send initial message
+    await update.message.reply_text(
+        f"🔍 Scraping r/{subreddit}...\n"
+        f"📊 Fetching {limit} {sort_type} posts"
+        f"{f' from the past {time_filter}' if sort_type == 'top' else ''}..."
+    )
+    
+    try:
+        # Scrape Reddit
+        posts = await reddit_scraper.scrape_subreddit(
+            subreddit_name=subreddit,
+            limit=limit,
+            sort_type=sort_type,
+            time_filter=time_filter
+        )
+        
+        if not posts:
+            await update.message.reply_text(
+                f"❌ No posts found in r/{subreddit}. "
+                "Please check the subreddit name and try again."
+            )
+            return
+        
+        # Prepare data for n8n
+        scrape_data = {
+            "telegram_id": user_id,
+            "command": "scrape",
+            "subreddit": subreddit,
+            "posts": [asdict(post) for post in posts],
+            "metadata": {
+                "sort_type": sort_type,
+                "time_filter": time_filter,
+                "count": len(posts),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        }
+        
+        # Send titles preview to user
+        titles_preview = "\n\n".join([
+            f"{i+1}. {post.title[:100]}{'...' if len(post.title) > 100 else ''}"
+            for i, post in enumerate(posts[:5])
+        ])
+        
+        await update.message.reply_text(
+            f"✅ Successfully scraped {len(posts)} posts from r/{subreddit}!\n\n"
+            f"**Preview of titles:**\n{titles_preview}\n\n"
+            f"{'... and ' + str(len(posts) - 5) + ' more' if len(posts) > 5 else ''}"
+        )
+        
+        # Ask user if they want AI processing
+        await update.message.reply_text(
+            "🤖 Would you like me to process these titles with AI?\n"
+            "Reply with your instructions for how to rewrite them, "
+            "or type 'skip' to just save the original titles."
+        )
+        
+        # Store data in context for next message
+        context.user_data['pending_scrape'] = scrape_data
+        context.user_data['awaiting_ai_prompt'] = True
         
     except Exception as e:
-        logger.error(f"Error enhancing titles: {str(e)}")
-        return jsonify({
-            "status": "failed",
-            "message": f"Error enhancing titles: {str(e)}"
-        }), 500
+        logger.error(f"Error in scrape command: {e}")
+        await update.message.reply_text(
+            f"❌ Error scraping r/{subreddit}: {str(e)}\n"
+            "Please check the subreddit name and try again."
+        )
 
-# Backward compatibility endpoint
-@app.route('/api/scrape', methods=['POST'])
-def scrape_reddit():
-    """Backward compatibility with old scrape endpoint"""
-    return scrape_simple()
+async def handle_ai_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle AI prompt for title rewriting"""
+    if not context.user_data.get('awaiting_ai_prompt'):
+        return
+    
+    user_message = update.message.text.strip()
+    scrape_data = context.user_data.get('pending_scrape')
+    
+    if not scrape_data:
+        await update.message.reply_text("❌ No pending scrape data found. Please run /scrape again.")
+        context.user_data['awaiting_ai_prompt'] = False
+        return
+    
+    # Clear the waiting flag
+    context.user_data['awaiting_ai_prompt'] = False
+    
+    if user_message.lower() == 'skip':
+        # Just send original titles to n8n
+        scrape_data['ai_processing'] = False
+    else:
+        # Include AI prompt
+        scrape_data['ai_processing'] = True
+        scrape_data['ai_prompt'] = user_message
+    
+    # Send to n8n if configured
+    if n8n_connector:
+        await update.message.reply_text("📤 Sending data to n8n workflow...")
+        try:
+            response = await n8n_connector.send_to_n8n(scrape_data)
+            await update.message.reply_text(
+                "✅ Data successfully sent to n8n!\n"
+                f"Response: {response.get('message', 'Processing complete')}"
+            )
+        except Exception as e:
+            logger.error(f"Error sending to n8n: {e}")
+            await update.message.reply_text(
+                "⚠️ Error sending to n8n workflow. Data has been logged locally."
+            )
+    else:
+        # Log locally if n8n not configured
+        logger.info(f"Scrape data (n8n not configured): {json.dumps(scrape_data, indent=2)}")
+        await update.message.reply_text(
+            "✅ Scrape complete! (n8n webhook not configured - data logged locally)"
+        )
+    
+    # Clear user data
+    context.user_data.clear()
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /help command"""
+    help_text = """
+🤖 **Reddit Scraper Bot**
+
+**Available Commands:**
+📊 `/scrape [subreddit] [limit] [sort] [time]`
+Scrape Reddit posts and optionally rewrite titles with AI
+
+**Parameters:**
+• `subreddit`: Name of the subreddit (without r/)
+• `limit`: Number of posts (1-50)
+• `sort`: hot, new, top, rising
+• `time`: hour, day, week, month, year, all (for top posts)
+
+**Example:**
+`/scrape python 10 top week`
+
+This will fetch the top 10 posts from r/python over the past week.
+
+After scraping, you can provide AI instructions to rewrite the titles or type 'skip' to keep originals.
+"""
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command"""
+    user_name = update.effective_user.first_name
+    await update.message.reply_text(
+        f"👋 Welcome {user_name}!\n\n"
+        "I'm a Reddit scraper bot that can fetch post titles and send them to n8n workflows.\n\n"
+        "Use /help to see available commands."
+    )
+
+def main() -> None:
+    """Start the bot"""
+    # Validate environment variables
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN not set!")
+        return
+    
+    if not REDDIT_CLIENT_ID or not REDDIT_CLIENT_SECRET:
+        logger.error("Reddit API credentials not set!")
+        return
+    
+    if not N8N_WEBHOOK_URL:
+        logger.warning("N8N_WEBHOOK_URL not set - will log data locally only")
+    
+    # Create application
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("scrape", scrape_command))
+    
+    # Add message handler for AI prompts
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_ai_prompt
+    ))
+    
+    # Start the bot
+    logger.info("Starting Reddit Scraper Bot...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    main()
