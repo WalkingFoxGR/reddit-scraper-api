@@ -1,28 +1,34 @@
 services:
-  - type: web
-    name: reddit-scraper-api
+  - type: worker
+    name: reddit-scraper-bot
     runtime: python
+    region: oregon
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app -c gunicorn.conf.py
-    pythonVersion: "3.11"
+    startCommand: python bot.py
     envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
       - key: REDDIT_CLIENT_ID
         sync: false
       - key: REDDIT_CLIENT_SECRET
         sync: false
       - key: REDDIT_USER_AGENT
-        value: RedditScraper/1.0
-      - key: OPENAI_API_KEY
+        value: RedditScraperBot/1.0 by YourRedditUsername
+      - key: N8N_WEBHOOK_URL
         sync: false
-      - key: API_KEY
-        generateValue: true
-      - key: DATABASE_URL
-        fromDatabase:
-          name: reddit-scraper-db
+      - key: ALLOWED_USERS
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: reddit-bot-redis
           property: connectionString
 
+# Optional Redis instance for rate limiting
 databases:
-  - name: reddit-scraper-db
+  - name: reddit-bot-redis
+    type: redis
+    region: oregon
     plan: free
-    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
