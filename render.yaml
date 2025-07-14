@@ -1,34 +1,17 @@
 services:
   - type: worker
-    name: reddit-scraper-bot
+    name: reddit-telegram-bot
     runtime: python
     region: oregon
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: REDDIT_CLIENT_ID
-        sync: false
-      - key: REDDIT_CLIENT_SECRET
-        sync: false
-      - key: REDDIT_USER_AGENT
-        value: RedditScraperBot/1.0 by YourRedditUsername
+      - key: REDDIT_API_URL
+        value: https://reddit-scraper-api-yp5t.onrender.com
       - key: N8N_WEBHOOK_URL
         sync: false
       - key: ALLOWED_USERS
-        sync: false
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: reddit-bot-redis
-          property: connectionString
-
-# Optional Redis instance for rate limiting
-databases:
-  - name: reddit-bot-redis
-    type: redis
-    region: oregon
-    plan: free
-    maxmemoryPolicy: allkeys-lru
+        value: "5028346767,6150863409,5157639618"
