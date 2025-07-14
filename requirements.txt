@@ -1,6 +1,5 @@
-flask==3.0.0
-gunicorn==21.2.0
+python-telegram-bot==20.7
 praw==7.7.1
-openai==0.28.1
+redis==5.0.1
+aiohttp==3.9.1
 python-dotenv==1.0.0
-requests==2.31.0
